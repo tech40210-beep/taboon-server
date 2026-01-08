@@ -1,8 +1,0 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-dotenv==1.0.1
-openai==1.57.4
-slowapi==0.1.9
-pydantic==2.10.4
-pytz==2024.2
-websockets==14.1
