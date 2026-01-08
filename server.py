@@ -36,6 +36,43 @@ import pytz
 # تحميل متغيرات البيئة
 load_dotenv()
 
+# مسار ملف بيانات الزبائن
+CUSTOMERS_FILE = 'customers_data.json'
+
+def load_customers():
+    """تحميل بيانات الزبائن من JSON"""
+    if os.path.exists(CUSTOMERS_FILE):
+        try:
+            with open(CUSTOMERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_customers(customers):
+    """حفظ بيانات الزبائن في JSON"""
+    try:
+        with open(CUSTOMERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(customers, f, ensure_ascii=False, indent=2)
+        return True
+    except:
+        return False
+
+def get_customer_data(fingerprint):
+    """الحصول على بيانات زبون معين"""
+    customers = load_customers()
+    return customers.get(fingerprint, None)
+
+def save_customer_data(fingerprint, data):
+    """حفظ بيانات زبون"""
+    customers = load_customers()
+    customers[fingerprint] = {
+        **data,
+        'lastVisit': datetime.now().isoformat(),
+        'visitCount': customers.get(fingerprint, {}).get('visitCount', 0) + 1
+    }
+    save_customers(customers)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 🔐 الإعدادات الحساسة
 # ═══════════════════════════════════════════════════════════════════════════
@@ -172,6 +209,16 @@ manager = ConnectionManager()
 # ═══════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = """# وكيل طلبات مطعم ملك الطابون
+
+## 🧠 الذاكرة الذكية
+إذا وجدت بيانات محفوظة للزبون:
+- استخدمها مباشرة بدون السؤال عنها مرة ثانية
+- اذكر اسمه وقل "أهلاً [الاسم]!"
+- إذا كان orderType محفوظ، اسأل: "زي العادة [داخل المحل/بالسيارة/توصيل]؟"
+- إذا كانت السيارة محفوظة، قل: "السيارة [اللون] صح؟"
+
+⚠️ مهم: اسأل فقط عن البيانات الناقصة!
+
 ## هويتك
 أنت مساعد طلبات مطعم "ملك الطابون والمعجنات" في العيزرية. تستقبل طلبات الزبائن باللهجة الفلسطينية.
 
@@ -443,10 +490,32 @@ def chat_endpoint():
 
     message = data['message']
     history = data.get('history', [])
+    fingerprint = data.get('fingerprint')  # ✅ إضافة
+
+    # ✅ الحصول على بيانات الزبون المحفوظة
+    customer_data = None
+    if fingerprint:
+        customer_data = get_customer_data(fingerprint)
 
     # بناء المحادثة
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
+
+    # ✅ إضافة بيانات الزبون للـ AI
+    if customer_data:
+        context = f"\n\n📋 بيانات الزبون المحفوظة:\n"
+        context += f"- الاسم: {customer_data.get('name', 'غير محفوظ')}\n"
+        context += f"- الجوال: {customer_data.get('phone', 'غير محفوظ')}\n"
+        context += f"- نوع الطلب المعتاد: {customer_data.get('orderType', 'غير محفوظ')}\n"
+        if customer_data.get('carColor'):
+            context += f"- السيارة: {customer_data['carColor']}\n"
+        if customer_data.get('address'):
+            context += f"- العنوان: {customer_data['address']}\n"
+        if customer_data.get('locationName'):
+            context += f"- اسم المكان: {customer_data['locationName']}\n"
+        context += f"- عدد الطلبات السابقة: {customer_data.get('visitCount', 0)}\n"
+        
+        messages[0]["content"] += context
+
     # إضافة التاريخ (آخر 10 رسائل)
     for msg in history[-10:]:
         messages.append({
@@ -483,6 +552,17 @@ def chat_endpoint():
             try:
                 order_data = json.loads(order_match.group(1).strip())
                 
+                # ✅ حفظ بيانات الزبون
+                if fingerprint:
+                    save_customer_data(fingerprint, {
+                        'name': order_data.get('customer'),
+                        'phone': order_data.get('phone'),
+                        'orderType': order_data.get('orderType'),
+                        'carColor': order_data.get('carInfo'),
+                        'address': order_data.get('address'),
+                        'locationName': order_data.get('location')
+                    })
+                
                 db.counter += 1
                 order = {
                     'id': db.counter,
@@ -498,7 +578,8 @@ def chat_endpoint():
                     'status': 'new',
                     'createdAt': datetime.now().isoformat(),
                     'updatedAt': datetime.now().isoformat(),
-                    'source': 'AI_Chat'
+                    'source': 'AI_Chat',
+                    'fingerprint': fingerprint  # ✅ حفظ البصمة
                 }
                 
                 db.orders.insert(0, order)
