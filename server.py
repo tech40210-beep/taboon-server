@@ -492,27 +492,24 @@ def chat_endpoint():
     history = data.get('history', [])
     fingerprint = data.get('fingerprint')  # ✅ إضافة
 
-    # ✅ الحصول على بيانات الزبون المحفوظة
-    customer_data = None
-    if fingerprint:
-        customer_data = get_customer_data(fingerprint)
+    # ✅ استقبال بيانات الزبون من المتصفح (Client-Side Memory)
+    client_customer_data = data.get('customerData', {})
 
     # بناء المحادثة
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # ✅ إضافة بيانات الزبون للـ AI
-    if customer_data:
-        context = f"\n\n📋 بيانات الزبون المحفوظة:\n"
-        context += f"- الاسم: {customer_data.get('name', 'غير محفوظ')}\n"
-        context += f"- الجوال: {customer_data.get('phone', 'غير محفوظ')}\n"
-        context += f"- نوع الطلب المعتاد: {customer_data.get('orderType', 'غير محفوظ')}\n"
-        if customer_data.get('carColor'):
-            context += f"- السيارة: {customer_data['carColor']}\n"
-        if customer_data.get('address'):
-            context += f"- العنوان: {customer_data['address']}\n"
-        if customer_data.get('locationName'):
-            context += f"- اسم المكان: {customer_data['locationName']}\n"
-        context += f"- عدد الطلبات السابقة: {customer_data.get('visitCount', 0)}\n"
+    if client_customer_data:
+        context = f"\n\n📋 بيانات الزبون (من الذاكرة المحلية):\n"
+        context += f"- الاسم: {client_customer_data.get('name', 'غير محفوظ')}\n"
+        context += f"- الجوال: {client_customer_data.get('phone', 'غير محفوظ')}\n"
+        context += f"- نوع الطلب المعتاد: {client_customer_data.get('orderType', 'غير محفوظ')}\n"
+        if client_customer_data.get('carColor'):
+            context += f"- السيارة: {client_customer_data['carColor']}\n"
+        if client_customer_data.get('address'):
+            context += f"- العنوان: {client_customer_data['address']}\n"
+        if client_customer_data.get('locationName'):
+            context += f"- اسم المكان: {client_customer_data['locationName']}\n"
         
         messages[0]["content"] += context
 
@@ -550,10 +547,21 @@ def chat_endpoint():
         
         if order_match:
             try:
-                order_data = json.loads(order_match.group(1).strip())
+                # Clean up markdown code blocks if present
+                raw_json = order_match.group(1).strip()
+                if raw_json.startswith('```json'):
+                    raw_json = raw_json[7:]
+                if raw_json.startswith('```'):
+                    raw_json = raw_json[3:]
+                if raw_json.endswith('```'):
+                    raw_json = raw_json[:-3]
+                
+                order_data = json.loads(raw_json.strip())
+                print(f"📦 Extracted order data: {order_data}")
                 
                 # ✅ حفظ بيانات الزبون
                 if fingerprint:
+                    print(f"💾 Saving customer data for {fingerprint}...")
                     save_customer_data(fingerprint, {
                         'name': order_data.get('customer'),
                         'phone': order_data.get('phone'),
@@ -562,6 +570,8 @@ def chat_endpoint():
                         'address': order_data.get('address'),
                         'locationName': order_data.get('location')
                     })
+                else:
+                    print("⚠️ No fingerprint provided, skipping customer save")
                 
                 db.counter += 1
                 order = {
