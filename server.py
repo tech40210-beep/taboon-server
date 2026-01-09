@@ -33,51 +33,74 @@ import requests
 from dotenv import load_dotenv
 import pytz
 
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
+
 # تحميل متغيرات البيئة
 load_dotenv()
 
-# مسار ملف بيانات الزبائن
-CUSTOMERS_FILE = 'customers_data.json'
+# ═══════════════════════════════════════════════════════════════════════════
+# 💾 قاعدة بيانات MongoDB - التخزين الدائم
+# ═══════════════════════════════════════════════════════════════════════════
 
-def load_customers():
-    """تحميل بيانات الزبائن من JSON"""
-    if os.path.exists(CUSTOMERS_FILE):
-        try:
-            with open(CUSTOMERS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+MONGODB_URL = os.getenv('MONGODB_URL')
+mongo_client = None
+db_customers = None
+db_orders = None
 
-def save_customers(customers):
-    """حفظ بيانات الزبائن في JSON"""
+if MONGODB_URL:
     try:
-        with open(CUSTOMERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(customers, f, ensure_ascii=False, indent=2)
-        return True
-    except:
-        return False
+        mongo_client = MongoClient(MONGODB_URL, server_api=ServerApi('1'))
+        # Send a ping to confirm a successful connection
+        mongo_client.admin.command('ping')
+        print("✅ Pinged your deployment. You successfully connected to MongoDB!")
+        
+        # Access database and collections
+        database = mongo_client['king_of_taboon']
+        db_customers = database['customers']
+        db_orders = database['orders']
+        print("✅ MongoDB Collections initialized")
+    except Exception as e:
+        print(f"❌ MongoDB Connection Failed: {e}")
+else:
+    print("⚠️ No MONGODB_URL provided")
 
 def get_customer_data(fingerprint):
-    """الحصول على بيانات زبون معين"""
-    customers = load_customers()
-    return customers.get(fingerprint, None)
+    """الحصول على بيانات زبون معين من MongoDB"""
+    if db_customers:
+        try:
+            return db_customers.find_one({'_id': fingerprint})
+        except Exception as e:
+            print(f"Error reading customer: {e}")
+            return None
+    return None
 
 def save_customer_data(fingerprint, data):
-    """حفظ بيانات زبون"""
-    customers = load_customers()
-    customers[fingerprint] = {
-        **data,
-        'lastVisit': datetime.now().isoformat(),
-        'visitCount': customers.get(fingerprint, {}).get('visitCount', 0) + 1
-    }
-    save_customers(customers)
+    """حفظ بيانات زبون في MongoDB"""
+    if db_customers:
+        try:
+            update_data = {
+                **data,
+                'lastVisit': datetime.now().isoformat()
+            }
+            # Upsert: Update if exists, Insert if not
+            db_customers.update_one(
+                {'_id': fingerprint},
+                {
+                    '$set': update_data,
+                    '$inc': {'visitCount': 1}
+                },
+                upsert=True
+            )
+            print(f"💾 Customer {fingerprint} saved to MongoDB")
+        except Exception as e:
+            print(f"Error saving customer: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 🔐 الإعدادات الحساسة
 # ═══════════════════════════════════════════════════════════════════════════
 
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 if not OPENAI_API_KEY:
     print('⚠️  تحذير: مفتاح OpenAI غير مُعد! أضفه في متغيرات البيئة')
@@ -482,6 +505,31 @@ def websocket_order_notifications(ws, order_id):
 # 🔌 API Endpoints
 # ═══════════════════════════════════════════════════════════════════════════
 
+@app.route('/api/identify', methods=['POST'])
+def identify_customer():
+    data = request.json
+    fingerprint = data.get('fingerprint')
+    
+    if not fingerprint:
+        return jsonify({"success": False, "error": "Fingerprint required"}), 400
+        
+    # البحث في MongoDB
+    customer = get_customer_data(fingerprint)
+    
+    if customer:
+        print(f"✅ تم التعرف على الزبون: {customer.get('name')} ({fingerprint})")
+        return jsonify({
+            "success": True,
+            "found": True,
+            "data": customer
+        })
+    else:
+        print(f"⚠️ زبون جديد: {fingerprint}")
+        return jsonify({
+            "success": True,
+            "found": False
+        })
+
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
     data = request.json
@@ -490,29 +538,44 @@ def chat_endpoint():
 
     message = data['message']
     history = data.get('history', [])
-    fingerprint = data.get('fingerprint')  # ✅ إضافة
+    fingerprint = data.get('fingerprint')
 
-    # ✅ استقبال بيانات الزبون من المتصفح (Client-Side Memory)
+    # ✅ استرجاع البيانات الحقيقية من MongoDB (مصدر الحقيقة)
+    mongo_customer_data = None
+    if fingerprint:
+        mongo_customer_data = get_customer_data(fingerprint)
+
+    # دمج البيانات الجديدة القادمة من المتصفح مع القديمة من MongoDB
     client_customer_data = data.get('customerData', {})
+    
+    final_customer_data = mongo_customer_data if mongo_customer_data else {}
+    if client_customer_data:
+        # تحديث البيانات المحلية ببيانات جديدة قد تكون وصلت
+        final_customer_data.update(client_customer_data)
 
     # بناء المحادثة
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # ✅ إضافة بيانات الزبون للـ AI
-    if client_customer_data:
-        context = f"\n\n📋 بيانات الزبون (من الذاكرة المحلية):\n"
-        context += f"- الاسم: {client_customer_data.get('name', 'غير محفوظ')}\n"
-        context += f"- الجوال: {client_customer_data.get('phone', 'غير محفوظ')}\n"
-        context += f"- نوع الطلب المعتاد: {client_customer_data.get('orderType', 'غير محفوظ')}\n"
-        if client_customer_data.get('carColor'):
-            context += f"- السيارة: {client_customer_data['carColor']}\n"
-        if client_customer_data.get('address'):
-            context += f"- العنوان: {client_customer_data['address']}\n"
-        if client_customer_data.get('locationName'):
-            context += f"- اسم المكان: {client_customer_data['locationName']}\n"
+    if final_customer_data:
+        print(f"👤 Found customer data for AI: {final_customer_data.get('name')}")
         
-        messages[0]["content"] += context
-
+        system_injection = f"""
+        [SYSTEM MEMORY INJECTION]
+        ⚠️ URGENT INSTRUCTION FOR AI:
+        The user sending the next message is ALREADY KNOWN.
+        - Name: {final_customer_data.get('name', 'Unknown')}
+        - Phone: {final_customer_data.get('phone', 'Unknown')}
+        - Preferred Order: {final_customer_data.get('orderType', 'Unknown')}
+        - Car: {final_customer_data.get('carColor', 'Unknown')}
+        - Address: {final_customer_data.get('address', 'Unknown')}
+        - Location: {final_customer_data.get('locationName', 'Unknown')}
+        
+        DO NOT ask for their name. Greet them by name immediately!
+        Example: "أهلاً {final_customer_data.get('name')}! شو حابب تطلب اليوم؟"
+        """
+        messages.append({"role": "system", "content": system_injection})
+    
     # إضافة التاريخ (آخر 10 رسائل)
     for msg in history[-10:]:
         messages.append({
@@ -663,7 +726,7 @@ def create_order():
         'source': 'Manual'
     }
     
-    db.orders.insert(0, order)
+    db.add_order(order)
     print(f"📝 طلب يدوي #{order['id']}: {order['customerName']}")
     
     return jsonify({"success": True, "order": order})
@@ -740,8 +803,13 @@ def update_order(order_id):
             
     if 'notes' in data:
         order['notes'] = data['notes']
+        # Update MongoDB
+        db.update_order(order['id'], {'notes': order['notes']})
         
     order['updatedAt'] = datetime.now().isoformat()
+    # Update timestamp in MongoDB
+    db.update_order(order['id'], {'updatedAt': order['updatedAt']})
+    
     return jsonify({"success": True, "order": order})
 
 @app.route('/api/orders/<int:order_id>', methods=['DELETE'])
@@ -751,6 +819,15 @@ def delete_order(order_id):
         return jsonify({"success": False, "error": "الطلب غير موجود"}), 404
     
     db.orders.pop(order_index)
+    
+    # Delete from MongoDB
+    if db_orders:
+        try:
+            db_orders.delete_one({'_id': order_id})
+            print(f"🗑️ Deleted order #{order_id} from MongoDB")
+        except Exception as e:
+            print(f"Error deleting from Mongo: {e}")
+            
     print(f"🗑️ حذف #{order_id}")
     return jsonify({"success": True, "message": "تم حذف الطلب"})
 
@@ -849,8 +926,13 @@ def manual_cleanup():
     count = len(db.orders)
     db.orders = []
     db.counter = 1000
-    print(f"🧹 تم مسح {count} طلب")
-    return jsonify({"success": True, "message": f"تم مسح {count} طلب"})
+    
+    # Optional: Clear MongoDB orders too if requested
+    # if db_orders:
+    #     db_orders.delete_many({})
+        
+    print(f"🧹 تم مسح {count} طلب من الذاكرة")
+    return jsonify({"success": True, "message": f"تم مسح {count} طلب من الذاكرة"})
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 🚀 Startup
