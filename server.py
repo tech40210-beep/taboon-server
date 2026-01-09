@@ -43,7 +43,7 @@ load_dotenv()
 # 💾 قاعدة بيانات MongoDB - التخزين الدائم
 # ═══════════════════════════════════════════════════════════════════════════
 
-MONGODB_URL = "mongodb+srv://tech40210_db_user:tnyIoqe5elfdf29O@cluster0.pqho6kg.mongodb.net/?appName=Cluster0"
+MONGODB_URL = os.getenv('MONGODB_URL') or "mongodb+srv://tech40210_db_user:AOnqm0bCKR3JrLkb@cluster0.fczdj15.mongodb.net/?appName=Cluster0"
 mongo_client = None
 db_customers = None
 db_orders = None
