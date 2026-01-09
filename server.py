@@ -151,14 +151,66 @@ def serve_staff_static(path):
     return "Not Found", 404
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 📦 قاعدة البيانات المؤقتة
+# 📦 قاعدة البيانات (MongoDB Wrapper)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class Database:
     def __init__(self):
-        self.orders = []
-        self.counter = 1000
-        self.last_cleanup = datetime.now().strftime('%Y-%m-%d')
+        # لم نعد نستخدم القائمة المحلية، بل نعتمد على MongoDB مباشرة
+        pass
+
+    @property
+    def orders(self):
+        """جلب جميع الطلبات من MongoDB كقائمة (للتوافق مع الكود القديم)"""
+        if db_orders:
+            try:
+                # جلب آخر 100 طلب فقط للأداء، مرتبة تنازلياً
+                cursor = db_orders.find().sort('id', -1).limit(100)
+                return list(cursor)
+            except Exception as e:
+                print(f"Error fetching orders: {e}")
+                return []
+        return []
+
+    @property
+    def counter(self):
+        """الحصول على آخر ID للطلبات"""
+        if db_orders:
+            try:
+                last_order = db_orders.find_one(sort=[("id", -1)])
+                if last_order:
+                    return last_order['id']
+            except:
+                pass
+        return 1000
+
+    @counter.setter
+    def counter(self, value):
+        # لا نحتاج لتعيين العداد يدوياً لأننا نحسبه من القاعدة
+        pass
+
+    def add_order(self, order):
+        """إضافة طلب جديد إلى MongoDB"""
+        if db_orders:
+            try:
+                # استخدام _id كـ id الطلب للسهولة
+                order['_id'] = order['id']
+                db_orders.insert_one(order)
+                print(f"💾 Order #{order['id']} saved to MongoDB")
+            except Exception as e:
+                print(f"Error adding order: {e}")
+
+    def update_order(self, order_id, updates):
+        """تحديث طلب في MongoDB"""
+        if db_orders:
+            try:
+                db_orders.update_one(
+                    {'id': order_id},
+                    {'$set': updates}
+                )
+                print(f"💾 Order #{order_id} updated in MongoDB")
+            except Exception as e:
+                print(f"Error updating order: {e}")
 
 db = Database()
 
@@ -655,7 +707,8 @@ def chat_endpoint():
                     'fingerprint': fingerprint  # ✅ حفظ البصمة
                 }
                 
-                db.orders.insert(0, order)
+                # ✅ استخدام الطريقة الجديدة للإضافة
+                db.add_order(order)
                 order_id = order['id']
                 
                 print(f"🔔 طلب جديد من AI #{order_id}: {order['customerName']}")
@@ -814,22 +867,17 @@ def update_order(order_id):
 
 @app.route('/api/orders/<int:order_id>', methods=['DELETE'])
 def delete_order(order_id):
-    order_index = next((i for i, o in enumerate(db.orders) if o['id'] == order_id), None)
-    if order_index is None:
-        return jsonify({"success": False, "error": "الطلب غير موجود"}), 404
-    
-    db.orders.pop(order_index)
-    
-    # Delete from MongoDB
+    # البحث في MongoDB مباشرة
     if db_orders:
         try:
-            db_orders.delete_one({'_id': order_id})
-            print(f"🗑️ Deleted order #{order_id} from MongoDB")
+            result = db_orders.delete_one({'id': order_id})
+            if result.deleted_count > 0:
+                print(f"🗑️ Deleted order #{order_id} from MongoDB")
+                return jsonify({"success": True, "message": "تم حذف الطلب"})
         except Exception as e:
             print(f"Error deleting from Mongo: {e}")
             
-    print(f"🗑️ حذف #{order_id}")
-    return jsonify({"success": True, "message": "تم حذف الطلب"})
+    return jsonify({"success": False, "error": "الطلب غير موجود"}), 404
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
