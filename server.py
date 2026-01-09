@@ -67,7 +67,7 @@ else:
 
 def get_customer_data(fingerprint):
     """الحصول على بيانات زبون معين من MongoDB"""
-    if db_customers:
+    if db_customers is not None:
         try:
             return db_customers.find_one({'_id': fingerprint})
         except Exception as e:
@@ -600,10 +600,12 @@ def chat_endpoint():
     # دمج البيانات الجديدة القادمة من المتصفح مع القديمة من MongoDB
     client_customer_data = data.get('customerData', {})
     
-    final_customer_data = mongo_customer_data if mongo_customer_data else {}
-    if client_customer_data:
-        # تحديث البيانات المحلية ببيانات جديدة قد تكون وصلت
-        final_customer_data.update(client_customer_data)
+    # نبدأ بالبيانات من العميل (كاحتياط)
+    final_customer_data = client_customer_data.copy() if client_customer_data else {}
+    
+    # ولكن بيانات MongoDB هي الأصدق والأحدث دائماً
+    if mongo_customer_data:
+        final_customer_data.update(mongo_customer_data)
 
     # بناء المحادثة
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
