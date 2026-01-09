@@ -50,8 +50,18 @@ db_orders = None
 
 if MONGODB_URL:
     try:
-        mongo_client = MongoClient(MONGODB_URL, server_api=ServerApi('1'))
-        # Send a ping to confirm a successful connection
+        # ✅ إضافة خيارات TLS لضمان الاتصال في بيئات مختلفة
+        # tls=True: استخدام التشفير
+        # tlsAllowInvalidCertificates=True: قبول الشهادات غير الموثوقة (شائع في البيئات التجريبية)
+        mongo_client = MongoClient(
+            MONGODB_URL, 
+            server_api=ServerApi('1'),
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=5000  # مهلة 5 ثواني
+        )
+        
+        # محاولة الاتصال (Ping)
         mongo_client.admin.command('ping')
         print("✅ Pinged your deployment. You successfully connected to MongoDB!")
         
@@ -60,8 +70,10 @@ if MONGODB_URL:
         db_customers = database['customers']
         db_orders = database['orders']
         print("✅ MongoDB Collections initialized")
+        
     except Exception as e:
         print(f"❌ MongoDB Connection Failed: {e}")
+        # سنحاول الاتصال مرة أخرى لاحقاً عند الحاجة
 else:
     print("⚠️ No MONGODB_URL provided")
 
@@ -151,7 +163,7 @@ def serve_staff_static(path):
     return "Not Found", 404
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 📦 قاعدة البيانات (MongoDB Wrapper)
+# 💾 قاعدة البيانات (MongoDB Wrapper)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class Database:
@@ -162,7 +174,7 @@ class Database:
     @property
     def orders(self):
         """جلب جميع الطلبات من MongoDB كقائمة (للتوافق مع الكود القديم)"""
-        if db_orders:
+        if db_orders is not None:
             try:
                 # جلب آخر 100 طلب فقط للأداء، مرتبة تنازلياً
                 cursor = db_orders.find().sort('id', -1).limit(100)
@@ -175,7 +187,7 @@ class Database:
     @property
     def counter(self):
         """الحصول على آخر ID للطلبات"""
-        if db_orders:
+        if db_orders is not None:
             try:
                 last_order = db_orders.find_one(sort=[("id", -1)])
                 if last_order:
@@ -186,12 +198,11 @@ class Database:
 
     @counter.setter
     def counter(self, value):
-        # لا نحتاج لتعيين العداد يدوياً لأننا نحسبه من القاعدة
         pass
 
     def add_order(self, order):
         """إضافة طلب جديد إلى MongoDB"""
-        if db_orders:
+        if db_orders is not None:
             try:
                 # استخدام _id كـ id الطلب للسهولة
                 order['_id'] = order['id']
@@ -199,10 +210,12 @@ class Database:
                 print(f"💾 Order #{order['id']} saved to MongoDB")
             except Exception as e:
                 print(f"Error adding order: {e}")
+        else:
+            print("❌ Error: MongoDB is not connected! Order NOT saved.")
 
     def update_order(self, order_id, updates):
         """تحديث طلب في MongoDB"""
-        if db_orders:
+        if db_orders is not None:
             try:
                 db_orders.update_one(
                     {'id': order_id},
