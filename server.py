@@ -483,17 +483,28 @@ SYSTEM_PROMPT = """# وكيل طلبات مطعم ملك الطابون
 # ═══════════════════════════════════════════════════════════════════════════
 
 def auto_cleanup():
+    if db_orders is None:
+        return
+        
     today = datetime.now().strftime('%Y-%m-%d')
-    if today != db.last_cleanup:
-        yesterday = datetime.now() - timedelta(days=1)
-        yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        before = len(db.orders)
-        db.orders = [o for o in db.orders if datetime.fromisoformat(o['createdAt']) >= yesterday]
-        
-        if before != len(db.orders):
-            print(f"🧹 تنظيف تلقائي: حذف {before - len(db.orders)} طلب قديم")
-        db.last_cleanup = today
+    # تحقق من التنظيف مرة واحدة يومياً
+    if getattr(db, 'last_cleanup', '') != today:
+        try:
+            yesterday = datetime.now() - timedelta(days=1)
+            yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_iso = yesterday.isoformat()
+            
+            # حذف الطلبات الأقدم من الأمس
+            result = db_orders.delete_many({
+                'createdAt': {'$lt': yesterday_iso}
+            })
+            
+            if result.deleted_count > 0:
+                print(f"🧹 تنظيف تلقائي: تم حذف {result.deleted_count} طلب قديم من MongoDB")
+            
+            db.last_cleanup = today
+        except Exception as e:
+            print(f"Error in auto_cleanup: {e}")
 
 def daily_cleanup_loop():
     last_cleanup_date = ""
@@ -506,12 +517,18 @@ def daily_cleanup_loop():
             minutes = now.minute
             today_date = now.strftime('%Y-%m-%d')
             
+            # الساعة 5 فجراً
             if hours == 5 and minutes < 2 and last_cleanup_date != today_date:
-                deleted_count = len(db.orders)
-                db.orders = []
-                db.counter = 1000
-                last_cleanup_date = today_date
-                print(f'\n🧹 مسح يومي (5:00 فجراً) - حذف {deleted_count} طلب\n')
+                if db_orders is not None:
+                    # حذف جميع الطلبات (تصفير يومي)
+                    result = db_orders.delete_many({})
+                    deleted_count = result.deleted_count
+                    
+                    # إعادة تعيين العداد (اختياري، لكن يفضل الحفاظ على التسلسل)
+                    # db.counter = 1000 
+                    
+                    last_cleanup_date = today_date
+                    print(f'\n🧹 مسح يومي (5:00 فجراً) - تم حذف {deleted_count} طلب من MongoDB\n')
         except Exception as e:
             print(f"Error in cleanup loop: {e}")
         time.sleep(30)
@@ -883,31 +900,62 @@ def delete_order(order_id):
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
-    auto_cleanup()
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_orders = [o for o in db.orders if datetime.fromisoformat(o['createdAt']) >= today]
-    delivered_today = [o for o in today_orders if o['status'] == 'delivered']
+    # auto_cleanup() # Removed to avoid heavy operations on every stats call
     
-    return jsonify({
-        "success": True,
-        "stats": {
-            "total": len(db.orders),
-            "today": len(today_orders),
-            "todayRevenue": sum(o['total'] for o in delivered_today),
-            "byStatus": {
-                "new": len([o for o in db.orders if o['status'] == 'new']),
-                "preparing": len([o for o in db.orders if o['status'] == 'preparing']),
-                "ready": len([o for o in db.orders if o['status'] == 'ready']),
-                "delivered": len([o for o in db.orders if o['status'] == 'delivered']),
-                "cancelled": len([o for o in db.orders if o['status'] == 'cancelled'])
-            },
-            "byType": {
-                "dine_in": len([o for o in db.orders if o['orderType'] == 'dine_in']),
-                "car_pickup": len([o for o in db.orders if o['orderType'] == 'car_pickup']),
-                "delivery": len([o for o in db.orders if o['orderType'] == 'delivery'])
+    if not db_orders:
+        return jsonify({"success": False, "error": "Database not connected"})
+        
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_iso = today.isoformat()
+        
+        # Count directly from MongoDB
+        total_orders = db_orders.count_documents({})
+        today_count = db_orders.count_documents({'createdAt': {'$gte': today_iso}})
+        
+        # Aggregation for status
+        status_counts = list(db_orders.aggregate([
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}}
+        ]))
+        by_status = {item['_id']: item['count'] for item in status_counts}
+        
+        # Aggregation for type
+        type_counts = list(db_orders.aggregate([
+            {"$group": {"_id": "$orderType", "count": {"$sum": 1}}}
+        ]))
+        by_type = {item['_id']: item['count'] for item in type_counts}
+        
+        # Calculate revenue (only delivered)
+        revenue_pipeline = [
+            {"$match": {"status": "delivered", "createdAt": {"$gte": today_iso}}},
+            {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+        ]
+        revenue_result = list(db_orders.aggregate(revenue_pipeline))
+        today_revenue = revenue_result[0]['total'] if revenue_result else 0
+        
+        return jsonify({
+            "success": True,
+            "stats": {
+                "total": total_orders,
+                "today": today_count,
+                "todayRevenue": today_revenue,
+                "byStatus": {
+                    "new": by_status.get('new', 0),
+                    "preparing": by_status.get('preparing', 0),
+                    "ready": by_status.get('ready', 0),
+                    "delivered": by_status.get('delivered', 0),
+                    "cancelled": by_status.get('cancelled', 0)
+                },
+                "byType": {
+                    "dine_in": by_type.get('dine_in', 0),
+                    "car_pickup": by_type.get('car_pickup', 0),
+                    "delivery": by_type.get('delivery', 0)
+                }
             }
-        }
-    })
+        })
+    except Exception as e:
+        print(f"Stats Error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/orders/poll', methods=['GET'])
 def poll_orders():
@@ -961,6 +1009,60 @@ def get_ready_notifications():
         ]
     })
 
+@app.route('/api/test-db', methods=['GET'])
+def test_db_connection():
+    """Endpoint to diagnose MongoDB connection"""
+    results = {
+        "status": "unknown",
+        "connection_string_present": bool(MONGODB_URL),
+        "client_initialized": mongo_client is not None,
+        "collections": {},
+        "errors": []
+    }
+    
+    if not mongo_client:
+        results["status"] = "failed"
+        results["errors"].append("MongoClient not initialized")
+        return jsonify(results), 500
+
+    try:
+        # 1. Test Ping
+        mongo_client.admin.command('ping')
+        results["ping"] = "success"
+        
+        # 2. Check Collections
+        db_names = mongo_client.list_database_names()
+        results["databases"] = db_names
+        
+        # Try to connect and write even if not listed (MongoDB lazy creation)
+        db = mongo_client['king_of_taboon']
+        
+        # 3. Test Write/Read
+        try:
+            db.test_connection.insert_one({"test": "ok", "time": datetime.now().isoformat()})
+            doc = db.test_connection.find_one({"test": "ok"})
+            
+            if doc:
+                results["write_read_test"] = "success"
+                db.test_connection.delete_many({"test": "ok"})
+                results["status"] = "connected"
+                
+                # Update collections list after write
+                results["collections"] = db.list_collection_names()
+            else:
+                results["write_read_test"] = "failed"
+                results["status"] = "warning"
+        except Exception as e:
+            results["write_read_test"] = f"failed: {str(e)}"
+            results["status"] = "error"
+            results["errors"].append(f"Write failed: {str(e)}")
+        
+    except Exception as e:
+        results["status"] = "error"
+        results["errors"].append(str(e))
+        
+    return jsonify(results)
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -973,16 +1075,19 @@ def health_check():
 
 @app.route('/api/cleanup', methods=['DELETE'])
 def manual_cleanup():
-    count = len(db.orders)
-    db.orders = []
-    db.counter = 1000
-    
-    # Optional: Clear MongoDB orders too if requested
-    # if db_orders:
-    #     db_orders.delete_many({})
-        
-    print(f"🧹 تم مسح {count} طلب من الذاكرة")
-    return jsonify({"success": True, "message": f"تم مسح {count} طلب من الذاكرة"})
+    if db_orders:
+        try:
+            # حذف جميع الطلبات
+            result = db_orders.delete_many({})
+            count = result.deleted_count
+            # db.counter = 1000 # اختياري
+            print(f"🧹 تم مسح {count} طلب من MongoDB يدوياً")
+            return jsonify({"success": True, "message": f"تم مسح {count} طلب من قاعدة البيانات"})
+        except Exception as e:
+            print(f"Error in manual_cleanup: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+            
+    return jsonify({"success": False, "error": "Database not connected"}), 500
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 🚀 Startup
